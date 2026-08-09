@@ -335,7 +335,7 @@ Options for rendering whitespace with visible characters. Use `:set whitespace.r
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `render` | Whether to render whitespace. May either be `all` or `none`, or a table with sub-keys `space`, `nbsp`, `nnbsp`, `tab`, and `newline` | `"none"` |
+| `render` | Whether to render whitespace. May either be `all`, `trailing`, or `none`, or a table with sub-keys `space`, `nbsp`, `nnbsp`, `tab`, and `newline` | `"none"` |
 | `characters` | Literal characters to use when rendering whitespace. Sub-keys may be any of `tab`, `space`, `nbsp`, `nnbsp`, `newline` or `tabpad` | See example below |
 
 Example
@@ -343,6 +343,7 @@ Example
 ```toml
 [editor.whitespace]
 render = "all"
+# render = "trailing" to only render whitespace at the end of a line
 # or control each character
 [editor.whitespace.render]
 space = "all"
@@ -359,6 +360,8 @@ tab = "→"
 newline = "⏎"
 tabpad = "·" # Tabs will look like "→···" (depending on tab width)
 ```
+
+Trailing whitespace is rendered with the `ui.virtual.trailing_whitespace` theme scope, which can be used to give it a distinct appearance.
 
 ### `[editor.indent-guides]` Section
 

@@ -7,13 +7,14 @@ use helix_core::syntax::{self, HighlightEvent, Highlighter, OverlayHighlights};
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{visual_offset_from_block, Position, RopeSlice};
 use helix_stdx::rope::RopeSliceExt;
-use helix_view::editor::{WhitespaceConfig, WhitespaceRenderValue};
+use helix_view::editor::{WhitespaceFeature, WhitespacePalette, WhitespaceRenderValue};
 use helix_view::graphics::Rect;
 use helix_view::theme::Style;
 use helix_view::view::ViewPosition;
 use helix_view::{Document, Theme};
 use tui::buffer::Buffer as Surface;
 
+use super::trailing_whitespace::TrailingWhitespaceTracker;
 use crate::ui::text_decorations::DecorationManager;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -177,6 +178,7 @@ pub struct TextRenderer<'a> {
     surface: &'a mut Surface,
     pub text_style: Style,
     pub whitespace_style: Style,
+    pub trailing_whitespace_style: Style,
     pub indent_guide_char: String,
     pub indent_guide_style: Style,
     pub newline: String,
@@ -185,11 +187,13 @@ pub struct TextRenderer<'a> {
     pub space: String,
     pub tab: String,
     pub virtual_tab: String,
+    pub trailing: WhitespacePalette,
     pub indent_width: u16,
     pub starting_indent: usize,
     pub draw_indent_guides: bool,
     pub viewport: Rect,
     pub offset: Position,
+    pub trailing_whitespace_tracker: TrailingWhitespaceTracker<'a>,
 }
 
 pub struct GraphemeStyle {
@@ -200,62 +204,37 @@ pub struct GraphemeStyle {
 impl<'a> TextRenderer<'a> {
     pub fn new(
         surface: &'a mut Surface,
-        doc: &Document,
+        doc: &'a Document,
         theme: &Theme,
         offset: Position,
         viewport: Rect,
     ) -> TextRenderer<'a> {
         let editor_config = doc.config.load();
-        let WhitespaceConfig {
-            render: ws_render,
-            characters: ws_chars,
-        } = &editor_config.whitespace;
+        let ws = &editor_config.whitespace;
 
         let tab_width = doc.tab_width();
-        let tab = if ws_render.tab() == WhitespaceRenderValue::All {
-            std::iter::once(ws_chars.tab)
-                .chain(std::iter::repeat_n(ws_chars.tabpad, tab_width - 1))
-                .collect()
-        } else {
-            " ".repeat(tab_width)
-        };
-        let virtual_tab = " ".repeat(tab_width);
-        let newline = if ws_render.newline() == WhitespaceRenderValue::All {
-            ws_chars.newline.into()
-        } else {
-            " ".to_owned()
-        };
-
-        let space = if ws_render.space() == WhitespaceRenderValue::All {
-            ws_chars.space.into()
-        } else {
-            " ".to_owned()
-        };
-        let nbsp = if ws_render.nbsp() == WhitespaceRenderValue::All {
-            ws_chars.nbsp.into()
-        } else {
-            " ".to_owned()
-        };
-        let nnbsp = if ws_render.nnbsp() == WhitespaceRenderValue::All {
-            ws_chars.nnbsp.into()
-        } else {
-            " ".to_owned()
-        };
+        let regular_ws = WhitespaceFeature::Regular.palette(ws, tab_width);
+        let trailing_ws = WhitespaceFeature::Trailing.palette(ws, tab_width);
 
         let text_style = theme.get("ui.text");
 
         let indent_width = doc.indent_style.indent_width(tab_width) as u16;
 
+        let text = doc.text().slice(..);
+        let trailing_enabled = ws.render.any(WhitespaceRenderValue::Trailing);
+
         TextRenderer {
             surface,
             indent_guide_char: editor_config.indent_guides.character.into(),
-            newline,
-            nbsp,
-            nnbsp,
-            space,
-            tab,
-            virtual_tab,
+            newline: regular_ws.newline,
+            nbsp: regular_ws.nbsp,
+            nnbsp: regular_ws.nnbsp,
+            space: regular_ws.space,
+            tab: regular_ws.tab,
+            virtual_tab: regular_ws.virtual_tab,
+            trailing: trailing_ws,
             whitespace_style: theme.get("ui.virtual.whitespace"),
+            trailing_whitespace_style: theme.get("ui.virtual.trailing_whitespace"),
             indent_width,
             starting_indent: offset.col / indent_width as usize
                 + !offset.col.is_multiple_of(indent_width as usize) as usize
@@ -269,6 +248,7 @@ impl<'a> TextRenderer<'a> {
             draw_indent_guides: editor_config.indent_guides.render,
             viewport,
             offset,
+            trailing_whitespace_tracker: TrailingWhitespaceTracker::new(trailing_enabled, text),
         }
     }
     /// Draws a single `grapheme` at the current render position with a specified `style`.
@@ -326,21 +306,45 @@ impl<'a> TextRenderer<'a> {
         position.row -= self.offset.row;
         let cut_off_start = self.offset.col.saturating_sub(position.col);
         let is_whitespace = grapheme.is_whitespace();
+        let is_trailing = is_whitespace && self.trailing_whitespace_tracker.is_trailing(grapheme);
 
         // TODO is it correct to apply the whitespace style to all unicode white spaces?
         let mut style = grapheme_style.syntax_style;
         if is_whitespace {
             style = style.patch(self.whitespace_style);
         }
+        if is_trailing {
+            style = style.patch(self.trailing_whitespace_style);
+        }
         style = style.patch(grapheme_style.overlay_style);
 
         let width = grapheme.width();
         let mut is_tab = false;
-        let space = if is_virtual { " " } else { &self.space };
-        let nbsp = if is_virtual { " " } else { &self.nbsp };
-        let nnbsp = if is_virtual { " " } else { &self.nnbsp };
+        let space = if is_virtual {
+            " "
+        } else if is_trailing {
+            &self.trailing.space
+        } else {
+            &self.space
+        };
+        let nbsp = if is_virtual {
+            " "
+        } else if is_trailing {
+            &self.trailing.nbsp
+        } else {
+            &self.nbsp
+        };
+        let nnbsp = if is_virtual {
+            " "
+        } else if is_trailing {
+            &self.trailing.nnbsp
+        } else {
+            &self.nnbsp
+        };
         let tab = if is_virtual {
             &self.virtual_tab
+        } else if is_trailing {
+            &self.trailing.tab
         } else {
             &self.tab
         };

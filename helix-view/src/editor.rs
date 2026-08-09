@@ -962,9 +962,89 @@ pub enum WhitespaceRender {
 #[serde(rename_all = "kebab-case")]
 pub enum WhitespaceRenderValue {
     None,
+    All,
+    Trailing,
     // TODO
     // Selection,
-    All,
+}
+
+impl WhitespaceRender {
+    pub fn any(&self, value: WhitespaceRenderValue) -> bool {
+        self.space() == value
+            || self.nbsp() == value
+            || self.nnbsp() == value
+            || self.tab() == value
+            || self.newline() == value
+    }
+}
+
+/// A whitespace rendering feature, e.g. all whitespace vs. only trailing whitespace.
+#[derive(Debug, Copy, Clone)]
+pub enum WhitespaceFeature {
+    /// Whitespace is rendered regardless of its position in the line.
+    Regular,
+    /// Whitespace is rendered only if it is trailing, i.e. followed by nothing
+    /// but whitespace up to the end of the line.
+    Trailing,
+}
+
+impl WhitespaceFeature {
+    pub fn is_enabled(self, render: WhitespaceRenderValue) -> bool {
+        match self {
+            WhitespaceFeature::Regular => render == WhitespaceRenderValue::All,
+            WhitespaceFeature::Trailing => matches!(
+                render,
+                WhitespaceRenderValue::All | WhitespaceRenderValue::Trailing
+            ),
+        }
+    }
+
+    pub fn palette(self, cfg: &WhitespaceConfig, tab_width: usize) -> WhitespacePalette {
+        WhitespacePalette::from(self, cfg, tab_width)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhitespacePalette {
+    pub space: String,
+    pub nbsp: String,
+    pub nnbsp: String,
+    pub tab: String,
+    pub virtual_tab: String,
+    pub newline: String,
+}
+
+impl WhitespacePalette {
+    pub fn from(feature: WhitespaceFeature, cfg: &WhitespaceConfig, tab_width: usize) -> Self {
+        Self {
+            space: if feature.is_enabled(cfg.render.space()) {
+                cfg.characters.space.to_string()
+            } else {
+                " ".to_string()
+            },
+            nbsp: if feature.is_enabled(cfg.render.nbsp()) {
+                cfg.characters.nbsp.to_string()
+            } else {
+                " ".to_string()
+            },
+            nnbsp: if feature.is_enabled(cfg.render.nnbsp()) {
+                cfg.characters.nnbsp.to_string()
+            } else {
+                " ".to_string()
+            },
+            tab: if feature.is_enabled(cfg.render.tab()) {
+                cfg.characters.generate_tab(tab_width)
+            } else {
+                " ".repeat(tab_width)
+            },
+            newline: if feature.is_enabled(cfg.render.newline()) {
+                cfg.characters.newline.to_string()
+            } else {
+                " ".to_string()
+            },
+            virtual_tab: " ".repeat(tab_width),
+        }
+    }
 }
 
 impl WhitespaceRender {
@@ -1074,6 +1154,16 @@ pub struct WhitespaceCharacters {
     pub tab: char,
     pub tabpad: char,
     pub newline: char,
+}
+
+impl WhitespaceCharacters {
+    /// Builds the string used to render a tab of the given `width` (in columns):
+    /// the `tab` character followed by `width - 1` `tabpad` characters.
+    pub fn generate_tab(&self, width: usize) -> String {
+        std::iter::once(self.tab)
+            .chain(std::iter::repeat_n(self.tabpad, width - 1))
+            .collect()
+    }
 }
 
 impl Default for WhitespaceCharacters {
@@ -2696,5 +2786,101 @@ impl CursorCache {
 
     pub fn reset(&self) {
         self.0.set(None)
+    }
+}
+
+#[cfg(test)]
+mod whitespace_tests {
+    use super::*;
+
+    #[test]
+    fn test_whitespace_render_any() {
+        let sut = WhitespaceRender::Basic(WhitespaceRenderValue::Trailing);
+        assert!(!sut.any(WhitespaceRenderValue::None));
+        assert!(!sut.any(WhitespaceRenderValue::All));
+        assert!(sut.any(WhitespaceRenderValue::Trailing));
+
+        let sut = WhitespaceRender::Specific {
+            default: Some(WhitespaceRenderValue::None),
+            space: Some(WhitespaceRenderValue::Trailing),
+            nbsp: None,
+            nnbsp: None,
+            tab: None,
+            newline: None,
+        };
+        assert!(sut.any(WhitespaceRenderValue::Trailing));
+        assert!(!sut.any(WhitespaceRenderValue::All));
+    }
+
+    #[test]
+    fn test_whitespace_feature_is_enabled() {
+        assert!(!WhitespaceFeature::Regular.is_enabled(WhitespaceRenderValue::None));
+        assert!(!WhitespaceFeature::Regular.is_enabled(WhitespaceRenderValue::Trailing));
+        assert!(WhitespaceFeature::Regular.is_enabled(WhitespaceRenderValue::All));
+
+        assert!(!WhitespaceFeature::Trailing.is_enabled(WhitespaceRenderValue::None));
+        assert!(WhitespaceFeature::Trailing.is_enabled(WhitespaceRenderValue::Trailing));
+        assert!(WhitespaceFeature::Trailing.is_enabled(WhitespaceRenderValue::All));
+    }
+
+    #[test]
+    fn test_whitespace_palette_regular_all() {
+        let cfg = WhitespaceConfig {
+            render: WhitespaceRender::Basic(WhitespaceRenderValue::All),
+            ..Default::default()
+        };
+
+        let sut = WhitespacePalette::from(WhitespaceFeature::Regular, &cfg, 2);
+
+        assert_eq!("·", sut.space);
+        assert_eq!("⍽", sut.nbsp);
+        assert_eq!("␣", sut.nnbsp);
+        assert_eq!("→ ", sut.tab);
+        assert_eq!("  ", sut.virtual_tab);
+        assert_eq!("⏎", sut.newline);
+    }
+
+    #[test]
+    fn test_whitespace_palette_regular_trailing() {
+        let cfg = WhitespaceConfig {
+            render: WhitespaceRender::Basic(WhitespaceRenderValue::Trailing),
+            ..Default::default()
+        };
+
+        let sut = WhitespacePalette::from(WhitespaceFeature::Regular, &cfg, 2);
+
+        assert_eq!(" ", sut.space);
+        assert_eq!(" ", sut.nbsp);
+        assert_eq!(" ", sut.nnbsp);
+        assert_eq!("  ", sut.tab);
+        assert_eq!("  ", sut.virtual_tab);
+        assert_eq!(" ", sut.newline);
+    }
+
+    #[test]
+    fn test_whitespace_palette_trailing_all() {
+        let cfg = WhitespaceConfig {
+            render: WhitespaceRender::Basic(WhitespaceRenderValue::All),
+            ..Default::default()
+        };
+
+        let sut = WhitespacePalette::from(WhitespaceFeature::Trailing, &cfg, 2);
+
+        assert_eq!("·", sut.space);
+        assert_eq!("⍽", sut.nbsp);
+        assert_eq!("␣", sut.nnbsp);
+        assert_eq!("→ ", sut.tab);
+        assert_eq!("  ", sut.virtual_tab);
+        assert_eq!("⏎", sut.newline);
+    }
+
+    #[test]
+    fn test_whitespace_characters_generate_tab() {
+        let sut = WhitespaceCharacters::default();
+
+        assert_eq!("→", sut.generate_tab(1));
+        assert_eq!("→ ", sut.generate_tab(2));
+        assert_eq!("→  ", sut.generate_tab(3));
+        assert_eq!("→   ", sut.generate_tab(4));
     }
 }
